@@ -7,6 +7,7 @@ from bfrepricer.ingest.betfair_adapter import market_tick_from_book
 from bfrepricer.ingest.betfair_rest import BetfairClient
 from bfrepricer.pricing.strategy import StrategyConfig, TopOfBookMicroStrategy
 from bfrepricer.execution.engine import ExecutionEngine
+from bfrepricer.execution.mark_to_market import mark_to_market
 from bfrepricer.state.orchestrator import MarketOrchestrator
 
 
@@ -84,7 +85,17 @@ def main() -> None:
             snap_exec = exec_engine.snapshot()
             if snap_exec != last_exec_snapshot:
                 last_exec_snapshot = snap_exec
-                print(f"[{tick.seq}] POSITIONS {snap_exec}")
+                # Enrich with mark-to-market PnL
+                enriched = {}
+                for (m, s_id), pos in exec_engine.positions.items():
+                    rb = state.snapshot().runners.get(s_id)
+                    mtm = mark_to_market(pos, best_back=rb.best_back if rb else None, best_lay=rb.best_lay if rb else None)
+                    enriched[f"{m}:{s_id}"] = {
+                        **snap_exec[f"{m}:{s_id}"],
+                        "unrealized_pnl": round(mtm, 4),
+                        "total_pnl": round(pos.realized_pnl + mtm, 4),
+                    }
+                print(f"[{tick.seq}] POSITIONS {enriched}")
 
         # DEDUPE: only emit if intents changed for this market
         sig = tuple(

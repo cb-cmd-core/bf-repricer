@@ -7,6 +7,7 @@ from bfrepricer.ingest.betfair_adapter import market_tick_from_book
 from bfrepricer.ingest.betfair_rest import BetfairClient
 from bfrepricer.pricing.strategy import StrategyConfig, TopOfBookMicroStrategy
 from bfrepricer.execution.engine import ExecutionEngine
+from bfrepricer.execution.close_rule import CloseRule, CloseRuleConfig
 from bfrepricer.execution.mark_to_market import mark_to_market
 from bfrepricer.state.orchestrator import MarketOrchestrator
 
@@ -39,6 +40,7 @@ def main() -> None:
     orch = MarketOrchestrator()
     strat = TopOfBookMicroStrategy(StrategyConfig())
     exec_engine = ExecutionEngine()
+    close_rule = CloseRule(CloseRuleConfig(take_profit_delta=0.10, stop_loss_delta=0.10))
     loops = 0
     HEARTBEAT_EVERY = 10
     last_exec_snapshot = None
@@ -78,6 +80,26 @@ def main() -> None:
             continue
 
         decision = strat.decide(state.snapshot())
+        snap = state.snapshot()
+        close_intents = close_rule.decide_closes(
+            market_id=tick.market_id,
+            runners=snap.runners,
+            positions=exec_engine.positions,
+        )
+        if close_intents:
+            exec_engine.process(close_intents)
+            print(f"[{tick.seq}] CLOSE {[(i.side.value, i.selection_id, i.price, i.size, i.reason) for i in close_intents]}")
+            time.sleep(2)
+            continue
+
+        # Suppress entry if we already have a position on that selection
+        filtered = []
+        for i in decision.intents:
+            pos = exec_engine.positions.get((i.market_id, i.selection_id))
+            if pos and pos.size != 0:
+                continue
+            filtered.append(i)
+        decision = decision.__class__(intents=tuple(filtered), notes=decision.notes)
         exec_engine.process(decision.intents)
         loops += 1
         # REPORT: only print when positions snapshot changes AND a fill happened

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict
 
 from bfrepricer.domain.events import MarketTick
@@ -27,25 +27,34 @@ class MarketSnapshot:
     last_seq: int
     last_publish_time: datetime
     regime: MarketRegime
+    cooldown_until: datetime | None
     runners: Dict[SelectionId, RunnerBook]
 
 
 class MarketState:
     """
-    In-memory state + regime tracker for a single market.
+    Market state with regime tracking and reopen cooldown hysteresis.
 
-    Invariants:
-    - seq is monotonic (idempotent on duplicates)
-    - regime transitions are explicit
-    - execution is disabled outside OPEN
+    Execution rules:
+    - Only OPEN markets may execute
+    - After reopening, execution is blocked until cooldown expires
+    - Fail closed by default
     """
 
-    def __init__(self, market_id: MarketId) -> None:
+    def __init__(
+        self,
+        market_id: MarketId,
+        *,
+        reopen_cooldown: timedelta = timedelta(seconds=2),
+    ) -> None:
         self._market_id = market_id
         self._last_seq: int = -1
         self._last_publish_time: datetime | None = None
         self._regime: MarketRegime = MarketRegime.UNKNOWN
         self._runners: Dict[SelectionId, RunnerBook] = {}
+
+        self._reopen_cooldown = reopen_cooldown
+        self._cooldown_until: datetime | None = None
 
     def apply(self, tick: MarketTick) -> None:
         if tick.market_id != self._market_id:
@@ -60,42 +69,52 @@ class MarketState:
         self._last_seq = tick.seq
         self._last_publish_time = tick.publish_time
 
+        prev_regime = self._regime
+
         # --- Regime inference (conservative) ---
         if tick.is_market_open is True:
-            if self._regime in {MarketRegime.UNKNOWN, MarketRegime.SUSPENDED}:
-                self._regime = MarketRegime.OPEN
+            if prev_regime in {MarketRegime.SUSPENDED, MarketRegime.UNKNOWN}:
+                self._cooldown_until = tick.publish_time + self._reopen_cooldown
+            self._regime = MarketRegime.OPEN
+
         elif tick.is_market_open is False:
-            # Could be suspended or closed; treat as SUSPENDED unless explicitly closed later
             self._regime = MarketRegime.SUSPENDED
 
-        # Merge runners
+        # Merge runner updates
         for rb in tick.runners:
             self._runners[rb.selection_id] = rb
 
     def assert_fresh(self, *, max_age: timedelta) -> None:
         if self._last_publish_time is None:
-            raise StaleMarketData("no ticks yet")
+            raise StaleMarketData("no ticks received")
 
         age = utc_now() - self._last_publish_time
         if age > max_age:
             raise StaleMarketData(f"stale data: {age}")
 
-    def can_execute(self) -> bool:
-        """
-        Hard execution gate.
-        Only OPEN is allowed.
-        """
-        return self._regime == MarketRegime.OPEN
+    def can_execute(self, *, now: datetime | None = None) -> bool:
+        if self._regime != MarketRegime.OPEN:
+            return False
 
-    def assert_safe_to_execute(self) -> None:
-        if not self.can_execute():
-            raise UnsafeMarketRegime(f"cannot execute in regime {self._regime}")
+        if self._cooldown_until is None:
+            return True
+
+        now = now or utc_now()
+        return now >= self._cooldown_until
+
+    def assert_safe_to_execute(self, *, now: datetime | None = None) -> None:
+        if not self.can_execute(now=now):
+            raise UnsafeMarketRegime(
+                f"unsafe to execute: regime={self._regime}, cooldown_until={self._cooldown_until}"
+            )
 
     def snapshot(self) -> MarketSnapshot:
         return MarketSnapshot(
             market_id=self._market_id,
             last_seq=self._last_seq,
-            last_publish_time=self._last_publish_time or datetime.fromtimestamp(0),
+            last_publish_time=self._last_publish_time
+            or datetime.fromtimestamp(0, tz=timezone.utc),
             regime=self._regime,
+            cooldown_until=self._cooldown_until,
             runners=dict(self._runners),
         )

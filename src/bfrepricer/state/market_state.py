@@ -33,13 +33,13 @@ class MarketSnapshot:
 
 class MarketState:
     """
-    Market state with explicit regime tracking + reopen cooldown + in-play lockout.
+    Market state with explicit regime tracking:
+    UNKNOWN / OPEN / SUSPENDED / IN_PLAY / CLOSED
 
     Execution rules:
-    - Only OPEN markets may execute
-    - After reopening, execution blocked until cooldown expires
-    - If market becomes IN_PLAY, execution is disabled permanently for this instance
-    - Fail closed by default
+    - Only OPEN may execute, and only after cooldown
+    - IN_PLAY is irreversible and permanently disables execution
+    - CLOSED is terminal: once closed, we stop mutating runner/regime state
     """
 
     def __init__(
@@ -67,14 +67,24 @@ class MarketState:
         if tick.seq < self._last_seq:
             raise OutOfOrderTick(f"{tick.seq=} < {self._last_seq=}")
 
+        # Always advance seq/time for observability even if terminal
         self._last_seq = tick.seq
         self._last_publish_time = tick.publish_time
 
-        # --- IN_PLAY is a hard regime lockout ---
+        # CLOSED is terminal and irreversible
+        if tick.is_closed is True:
+            self._regime = MarketRegime.CLOSED
+            return
+
+        # If already closed, ignore all further mutation
+        if self._regime == MarketRegime.CLOSED:
+            return
+
+        # IN_PLAY is an irreversible lockout
         if tick.is_in_play is True:
             self._regime = MarketRegime.IN_PLAY
 
-        # If already in-play, do not allow any other regime changes back to OPEN.
+        # If already in-play, do not allow regime changes back to OPEN/SUSPENDED
         if self._regime != MarketRegime.IN_PLAY:
             prev_regime = self._regime
 
@@ -86,7 +96,7 @@ class MarketState:
             elif tick.is_market_open is False:
                 self._regime = MarketRegime.SUSPENDED
 
-        # Merge runner updates
+        # Merge runner updates (only if not terminal)
         for rb in tick.runners:
             self._runners[rb.selection_id] = rb
 

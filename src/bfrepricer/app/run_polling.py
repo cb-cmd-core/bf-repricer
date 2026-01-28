@@ -8,6 +8,7 @@ from bfrepricer.ingest.betfair_rest import BetfairClient
 from bfrepricer.pricing.strategy import StrategyConfig, TopOfBookMicroStrategy
 from bfrepricer.execution.engine import ExecutionEngine
 from bfrepricer.execution.close_rule import CloseRule, CloseRuleConfig
+from bfrepricer.execution.risk import RiskGate, RiskConfig
 from bfrepricer.execution.mark_to_market import mark_to_market
 from bfrepricer.state.orchestrator import MarketOrchestrator
 
@@ -41,6 +42,7 @@ def main() -> None:
     strat = TopOfBookMicroStrategy(StrategyConfig())
     exec_engine = ExecutionEngine()
     close_rule = CloseRule(CloseRuleConfig(take_profit_delta=0.10, stop_loss_delta=0.10))
+    risk = RiskGate(RiskConfig(max_abs_pos_per_selection=10.0, max_abs_pos_per_market=30.0, max_order_size=2.0))
     loops = 0
     HEARTBEAT_EVERY = 10
     last_exec_snapshot = None
@@ -87,6 +89,7 @@ def main() -> None:
             positions=exec_engine.positions,
         )
         if close_intents:
+            close_intents = risk.filter_intents(intents=close_intents, positions=dict(exec_engine.positions))
             exec_engine.process(close_intents)
             print(f"[{tick.seq}] CLOSE {[(i.side.value, i.selection_id, i.price, i.size, i.reason) for i in close_intents]}")
             time.sleep(2)
@@ -100,6 +103,8 @@ def main() -> None:
                 continue
             filtered.append(i)
         decision = decision.__class__(intents=tuple(filtered), notes=decision.notes)
+        filtered_intents = risk.filter_intents(intents=decision.intents, positions=dict(exec_engine.positions))
+        decision = decision.__class__(intents=tuple(filtered_intents), notes=decision.notes)
         exec_engine.process(decision.intents)
         loops += 1
         # REPORT: only print when positions snapshot changes AND a fill happened

@@ -6,6 +6,7 @@ import time
 from bfrepricer.ingest.betfair_adapter import market_tick_from_book
 from bfrepricer.ingest.betfair_rest import BetfairClient
 from bfrepricer.pricing.strategy import StrategyConfig, TopOfBookMicroStrategy
+from bfrepricer.execution.engine import ExecutionEngine
 from bfrepricer.state.orchestrator import MarketOrchestrator
 
 
@@ -36,6 +37,7 @@ def main() -> None:
 
     orch = MarketOrchestrator()
     strat = TopOfBookMicroStrategy(StrategyConfig())
+    exec_engine = ExecutionEngine()
 
     seq = 1
     last_sig_by_market = {}
@@ -60,6 +62,7 @@ def main() -> None:
             continue
 
         decision = strat.decide(state.snapshot())
+        exec_engine.process(decision.intents)
 
         # DEDUPE: only emit if intents changed for this market
         sig = tuple(

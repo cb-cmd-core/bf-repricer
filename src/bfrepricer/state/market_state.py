@@ -33,11 +33,12 @@ class MarketSnapshot:
 
 class MarketState:
     """
-    Market state with regime tracking and reopen cooldown hysteresis.
+    Market state with explicit regime tracking + reopen cooldown + in-play lockout.
 
     Execution rules:
     - Only OPEN markets may execute
-    - After reopening, execution is blocked until cooldown expires
+    - After reopening, execution blocked until cooldown expires
+    - If market becomes IN_PLAY, execution is disabled permanently for this instance
     - Fail closed by default
     """
 
@@ -69,16 +70,21 @@ class MarketState:
         self._last_seq = tick.seq
         self._last_publish_time = tick.publish_time
 
-        prev_regime = self._regime
+        # --- IN_PLAY is a hard regime lockout ---
+        if tick.is_in_play is True:
+            self._regime = MarketRegime.IN_PLAY
 
-        # --- Regime inference (conservative) ---
-        if tick.is_market_open is True:
-            if prev_regime in {MarketRegime.SUSPENDED, MarketRegime.UNKNOWN}:
-                self._cooldown_until = tick.publish_time + self._reopen_cooldown
-            self._regime = MarketRegime.OPEN
+        # If already in-play, do not allow any other regime changes back to OPEN.
+        if self._regime != MarketRegime.IN_PLAY:
+            prev_regime = self._regime
 
-        elif tick.is_market_open is False:
-            self._regime = MarketRegime.SUSPENDED
+            if tick.is_market_open is True:
+                if prev_regime in {MarketRegime.SUSPENDED, MarketRegime.UNKNOWN}:
+                    self._cooldown_until = tick.publish_time + self._reopen_cooldown
+                self._regime = MarketRegime.OPEN
+
+            elif tick.is_market_open is False:
+                self._regime = MarketRegime.SUSPENDED
 
         # Merge runner updates
         for rb in tick.runners:

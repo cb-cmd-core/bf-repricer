@@ -39,6 +39,7 @@ def main() -> None:
     strat = TopOfBookMicroStrategy(StrategyConfig())
     exec_engine = ExecutionEngine()
     loops = 0
+    HEARTBEAT_EVERY = 10
     last_exec_snapshot = None
 
     seq = 1
@@ -58,7 +59,19 @@ def main() -> None:
             break
 
         state = orch.get(tick.market_id)
-        if not state or not state.can_execute():
+        if not state:
+            continue
+
+        loops += 1
+        if loops % HEARTBEAT_EVERY == 0:
+            snap = state.snapshot()
+            print(
+                f"[{tick.seq}] HEARTBEAT regime={snap.regime.name} "
+                f"in_play={snap.regime.name == 'IN_PLAY'} "
+                f"can_execute={state.can_execute()}"
+            )
+
+        if not state.can_execute():
             print(f"[{tick.seq}] guard blocked (regime/cooldown)")
             time.sleep(2)
             continue

@@ -38,6 +38,8 @@ def main() -> None:
     orch = MarketOrchestrator()
     strat = TopOfBookMicroStrategy(StrategyConfig())
     exec_engine = ExecutionEngine()
+    loops = 0
+    last_exec_snapshot = None
 
     seq = 1
     last_sig_by_market = {}
@@ -63,6 +65,13 @@ def main() -> None:
 
         decision = strat.decide(state.snapshot())
         exec_engine.process(decision.intents)
+        loops += 1
+        # REPORT: only print when positions snapshot changes AND a fill happened
+        if decision.intents:
+            snap_exec = exec_engine.snapshot()
+            if snap_exec != last_exec_snapshot:
+                last_exec_snapshot = snap_exec
+                print(f"[{tick.seq}] POSITIONS {snap_exec}")
 
         # DEDUPE: only emit if intents changed for this market
         sig = tuple(
